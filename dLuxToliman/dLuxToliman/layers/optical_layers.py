@@ -6,7 +6,7 @@ import os #ADDED BY ME (MILO)
 import dLux.utils as dlu
 from jax.scipy.ndimage import map_coordinates
 
-__all__ = ["ApplyBasisCLIMB", "TolimanPupilLayer", "PhaseGratingLayer", "TolimanApertureLayer"]
+__all__ = ["ApplyBasisCLIMB", "TolimanPupilLayer", "PhaseGratingLayer", "TolimanApertureLayer", "SidelobeShiftLayer"]
 
 OpticalLayer = lambda: dLux.optical_layers.OpticalLayer
 BasisLayer = lambda: dLux.optical_layers.BasisLayer
@@ -414,3 +414,5 @@ class SidelobeShiftLayer(AberratedLayer()):
         # SUS!!
 
         super().__init__(phase=sidelobe_shift)
+
+#blah
