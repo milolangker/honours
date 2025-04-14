@@ -10,11 +10,14 @@ import os
 
 MixedAlphaCen = lambda: dLuxToliman.sources.MixedAlphaCen
 
-__all__ = ["TolimanOpticalSystem"]
+__all__ = ["TolimanOpticalSystem", "SideLobeSystem"]
 
 OpticalLayer = lambda: dLux.optical_layers.OpticalLayer
 AngularOpticalSystem = lambda: dLux.optical_systems.AngularOpticalSystem
 
+# no need for lambda
+PointSource = dLux.sources.PointSource
+PointSources = dLux.sources.PointSources
 
 class TolimanOpticalSystem(AngularOpticalSystem()):
     def __init__(
@@ -383,3 +386,103 @@ class TolimanSpikes(TolimanOpticalSystem):
 
         # Return
         return central_psfs.sum(0), spikes.sum(0)
+
+# Adding my own class
+# Have to make it its own thing. I.e. an angular optical system with a few extra parameters
+# Wouldn't mind a simple toggle of struts on/off as well.
+# Will take all parameters necessary for the construction of the toliman layer
+
+# Nevermind, looks like I can just wrap it. Thanks chatgpt
+# although... not sure how this will work with telescope/detector layers and dithers
+# something for future me to worry about.
+class SideLobeSystem:
+    def __init__(self, base_system: AngularOpticalSystem):
+        self._base = base_system #stores original object
+
+    def __getattr__(self, name):
+        return getattr(self._base, name)
+
+    def compute_sidelobes(
+            self, 
+            grating_depth: float, 
+            grating_period: float, 
+            wavelength: float = None,
+            corner: Array = np.array([-1,-1]),
+            sources = None
+            ):
+        """
+        A function for modelling sidelobes efficiently given an aperture.
+        Note that any pupil and phase grating (i.e. abberated) layers 
+        should be absent from the input optical system.
+
+        Parameters
+        ----------
+        grating_depth : float
+            The depth of the phase grating in meters.
+
+        grating_period : float
+            The period of the phase grating in meters.
+
+        wavelength : float
+            The wavelength to centre the sidelobe image on, in meters.
+
+        corner : Array
+            The corner to simulate. 
+            [-1, -1] = bottom left, [1, -1] = bottom right, 
+            [-1,  1] = top left,    [1,  1] = top right.
+
+        sources : 
+            The source object to model
+        """
+        # compute the sidelobes
+        if isinstance(sources, PointSource):
+            # calculate the offset caused by phase grating (radians)
+            wavelengths = sources.wavelengths
+            weights = sources.weights
+            total_flux = sources.flux
+            position = sources.position
+            psf_pixel_scale = self.psf_pixel_scale
+
+            # calculate the centre angle (radians)
+            centre_angle = np.arcsin(wavelength/grating_period)
+
+            pixel_scale = dlu.arcsec2rad(psf_pixel_scale)
+            # make sure that the pixels are discretised correctly
+            centre_angle = (centre_angle//pixel_scale)*pixel_scale
+
+            new_center = position + corner * centre_angle
+
+            angles = np.arcsin(wavelengths/grating_period)
+
+            positions = np.ones((len(wavelengths),2))*new_center
+
+            # getting fluxes of certain wavelengths
+
+            # initialising new sources
+            new_sources = [None] * len(wavelengths)
+
+            # initialising psf
+            psf_npixels = self.psf_npixels
+            oversample = self.oversample
+            sidelobe_psf = np.zeros((psf_npixels*oversample,psf_npixels*oversample))
+            for idx, wl in enumerate(wavelengths):
+
+                positions = positions.at[idx].set(position + corner * angles[idx] - new_center)
+
+                new_sources[idx] = PointSource(wavelengths = np.array([wl]), 
+                                               position = positions[idx], 
+                                               flux = weights[idx]/np.sum(weights) * total_flux, 
+                                               weights = np.array([1]))
+                
+                sidelobe_psf += self.model(new_sources[idx])
+
+            # definitely ways to make the above code more efficient.
+            return sidelobe_psf
+        
+        elif isinstance(sources, PointSources):
+            return print('pee')
+        
+        else:
+            raise TypeError(f"Unsupported source type: {type(sources)}")
+
+# NOTE: Maybe avove parameters would be better for individual functions.
