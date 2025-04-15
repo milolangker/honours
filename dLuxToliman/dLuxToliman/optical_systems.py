@@ -10,14 +10,17 @@ import os
 
 MixedAlphaCen = lambda: dLuxToliman.sources.MixedAlphaCen
 
-__all__ = ["TolimanOpticalSystem", "SideLobeSystem"]
+__all__ = ["TolimanOpticalSystem", "SideLobeSystem", "SideLobeTelescope"]
 
 OpticalLayer = lambda: dLux.optical_layers.OpticalLayer
 AngularOpticalSystem = lambda: dLux.optical_systems.AngularOpticalSystem
+Telescope = lambda: dLux.instruments.Telescope
 
 # no need for lambda
 PointSource = dLux.sources.PointSource
 PointSources = dLux.sources.PointSources
+AngularOpticalSystem_object = dLux.optical_systems.AngularOpticalSystem
+Scene = dLux.sources.Scene
 
 class TolimanOpticalSystem(AngularOpticalSystem()):
     def __init__(
@@ -396,11 +399,15 @@ class TolimanSpikes(TolimanOpticalSystem):
 # although... not sure how this will work with telescope/detector layers and dithers
 # something for future me to worry about.
 class SideLobeSystem:
-    def __init__(self, base_system: AngularOpticalSystem):
-        self._base = base_system #stores original object
+    def __init__(self, optics: AngularOpticalSystem):
+        #self._base = base_system #stores original object
+        self.optics = optics
 
+    def __repr__(self):
+        return f"SideLobeSystem(\n  optics={repr(self.optics)}\n)"
+    
     def __getattr__(self, name):
-        return getattr(self._base, name)
+        return getattr(self.optics, name)
 
     def compute_sidelobes(
             self, 
@@ -486,3 +493,117 @@ class SideLobeSystem:
             raise TypeError(f"Unsupported source type: {type(sources)}")
 
 # NOTE: Maybe avove parameters would be better for individual functions.
+
+# Making the sidelobe telescope
+
+class SideLobeTelescope:
+    # initialising
+    def __init__(self, 
+                 telescope: Telescope, 
+                 grating_period: float, 
+                 grating_depth: float):
+        self.telescope = telescope
+        self.grating_period = grating_period
+        self.grating_depth = grating_depth
+
+    # the reason I want this stuff here is because you can then optimise for these
+    # with jax I think. i.e. can solve for the grating period
+    # also could add a relative angle/offset eventually.
+    # makes sense to have it here because it is part of the actual optics
+    # not just an artefact of propagation
+    
+    # representing itself
+    def __repr__(self):
+        return (
+            "SideLobeTelescope(\n"
+            f"  telescope={repr(self.telescope)},\n"
+            f"  grating_period={self.grating_period},\n"
+            f"  grating_depth={self.grating_depth}\n"
+            ")"
+        )
+    
+    # getting attributes
+    def __getattr__(self, name):
+        return getattr(self.telescope, name)
+
+    # now let's propagate some sidelobes.
+    def model_sidelobes(
+        self,
+        wavelength: float,
+        corner: Array = np.array([-1,-1]),
+        center: Array = np.array([0,0])
+    ):
+        optics = self.telescope.optics
+
+        if isinstance(optics, AngularOpticalSystem_object):
+
+            # calculating the central offset
+            center_angle = np.arcsin(wavelength/self.grating_period)
+            # getting pixel scale
+            pixel_scale = dlu.arcsec2rad(optics.psf_pixel_scale)
+            # make sure that the pixels are discretised correctly
+            center_angle_corrected = (center_angle//pixel_scale)*pixel_scale
+
+            # new center (american spelling)
+            new_center = center + corner * center_angle_corrected 
+
+            oversample = optics.oversample
+            psf_npixels = optics.psf_npixels
+            # blank image
+            image = np.zeros((oversample*psf_npixels, oversample*psf_npixels)) 
+        else:
+            print('error needs to be angular optical system')
+
+        # calling it scene but technically can just be one source
+        scene = self.source
+
+        # propagating sidelobes if you have a scene:
+        if isinstance(scene, Scene):
+            
+            # preparing the new sources
+            new_sources = {}
+
+            # using .items gives both name and values
+            for name, source in scene.sources.items():
+
+                # currently only take scenes as multiple point sources
+                if isinstance(source, PointSource):
+                    position = source.position
+                    flux = source.flux
+                    # not sure if need .spectrum here
+                    wavelengths = source.spectrum.wavelengths
+                    weights = source.spectrum.weights
+                    weights_sum = np.sum(weights)
+
+                    angles = np.arcsin(wavelengths/self.grating_period)
+
+                    # make a bunch of sources, propagate once.
+                    for idx, wl in enumerate(wavelengths):
+                        norm_flux = weights[idx]/weights_sum * flux
+
+                        wl_position = position + corner * angles[idx] - new_center
+
+                        mono_source = PointSource(
+                            wavelengths = np.array([wl]),
+                            position = wl_position,
+                            flux = norm_flux,
+                            weights = np.array([1])
+                        )
+
+                        # calling the new sources by the old sources + wavelength index
+                        new_name = f"{name}_wl{idx}"
+                        new_sources[new_name] = mono_source
+
+                else:
+                    print('error: scene needs to be point sources')
+            
+            # Assuming you can reinitialize the telescope with all original attributes
+            sidelobe_model_telescope = self.telescope.__class__(  # Create a new instance of the same class
+                optics = self.telescope.optics,
+                source = Scene(sources=list(new_sources.items())),
+                detector = self.telescope.detector
+            )
+            print('time1')
+            return sidelobe_model_telescope.model()           
+        else:
+            print('error needs to be scene of point sources')
