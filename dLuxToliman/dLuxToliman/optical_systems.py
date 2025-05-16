@@ -21,6 +21,7 @@ PointSource = dLux.sources.PointSource
 PointSources = dLux.sources.PointSources
 AngularOpticalSystem_object = dLux.optical_systems.AngularOpticalSystem
 Scene = dLux.sources.Scene
+from dLuxToliman.sources import AlphaCen
 
 class TolimanOpticalSystem(AngularOpticalSystem()):
     def __init__(
@@ -494,9 +495,16 @@ class SideLobeSystem:
 
 # NOTE: Maybe avove parameters would be better for individual functions.
 
-# Making the sidelobe telescope
+# Making the sidelobe telescope. want to time it so...
+import time
 
-class SideLobeTelescope:
+# make it an instrument
+class SideLobeTelescope(dLux.Instrument):
+    
+    telescope: Telescope
+    grating_period: float
+    grating_depth: float
+
     # initialising
     def __init__(self, 
                  telescope: Telescope, 
@@ -526,23 +534,30 @@ class SideLobeTelescope:
     def __getattr__(self, name):
         return getattr(self.telescope, name)
 
+    # define abstract method 'model', necessary for making it an instrument
+
+    def model(self):
+        return self.telescope.model()
+
+
     # now let's propagate some sidelobes.
     def model_sidelobes(
         self,
-        wavelength: float,
+        center_wavelength: float,
         corner: Array = np.array([-1,-1]),
         center: Array = np.array([0,0])
     ):
+        # TODO: need to make (assumed) pixel scale a parameter
         optics = self.telescope.optics
 
         if isinstance(optics, AngularOpticalSystem_object):
 
             # calculating the central offset
-            center_angle = np.arcsin(wavelength/self.grating_period)
+            center_angle = np.arcsin(center_wavelength/self.grating_period)
             # getting pixel scale
             pixel_scale = dlu.arcsec2rad(optics.psf_pixel_scale)
             # make sure that the pixels are discretised correctly
-            center_angle_corrected = (center_angle//pixel_scale)*pixel_scale
+            center_angle_corrected = np.floor(center_angle/pixel_scale)*pixel_scale
 
             # new center (american spelling)
             new_center = center + corner * center_angle_corrected 
@@ -556,6 +571,10 @@ class SideLobeTelescope:
 
         # calling it scene but technically can just be one source
         scene = self.source
+
+        if not isinstance(scene, Scene):
+            # forcing it to be scene (kinda jank)
+            scene = Scene(scene)
 
         # propagating sidelobes if you have a scene:
         if isinstance(scene, Scene):
@@ -575,7 +594,7 @@ class SideLobeTelescope:
                     weights = source.spectrum.weights
                     weights_sum = np.sum(weights)
 
-                    angles = np.arcsin(wavelengths/self.grating_period)
+                    angles = np.arcsin(wavelengths/self.grating_period) # not paraxial, because its far from center
 
                     # make a bunch of sources, propagate once.
                     for idx, wl in enumerate(wavelengths):
@@ -586,13 +605,43 @@ class SideLobeTelescope:
                         mono_source = PointSource(
                             wavelengths = np.array([wl]),
                             position = wl_position,
-                            flux = norm_flux,
-                            weights = np.array([1])
+                            flux = np.array(norm_flux), # to keep jax'ible..... not working... don't know why.
+                            weights = np.array([1]),
+                            milo = True
                         )
 
                         # calling the new sources by the old sources + wavelength index
                         new_name = f"{name}_wl{idx}"
                         new_sources[new_name] = mono_source
+
+                elif isinstance(source, AlphaCen):
+                    weights = self.norm_weights
+                    fluxes = self.raw_fluxes
+                    positions = self.xy_positions
+                    wavelengths = 1e-9 * self.wavelengths
+                    
+                    angles = np.arcsin(wavelengths/self.grating_period)
+
+                    # iterate for each star
+                    for star in range(weights.shape[0]):
+
+                        # iterate over wavelengths
+                        for idx, wl in enumerate(wavelengths):
+                            norm_flux = weights[star, idx] * fluxes[star]
+
+                            wl_position = positions[star] + corner * angles[idx] - new_center
+
+                            mono_source = PointSource(
+                                wavelengths = np.array([wl]),
+                                position = wl_position,
+                                flux = np.array(norm_flux),
+                                weights = np.array([1]),
+                                milo = True
+                            )
+
+                            # calling the source by old source + star + wavelength index
+                            new_name = f"{name}_star{star}_wl{idx}"
+                            new_sources[new_name] = mono_source
 
                 else:
                     print('error: scene needs to be point sources')
@@ -603,7 +652,10 @@ class SideLobeTelescope:
                 source = Scene(sources=list(new_sources.items())),
                 detector = self.telescope.detector
             )
-            print('time1')
-            return sidelobe_model_telescope.model()           
+            start = time.time()
+            sidelobe_image = sidelobe_model_telescope.model()
+            end = time.time()
+            print(f"Model time: {end-start:.4f} seconds.")
+            return sidelobe_image         
         else:
             print('error needs to be scene of point sources')
