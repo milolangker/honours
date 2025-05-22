@@ -316,7 +316,7 @@ class TolimanApertureLayer(TransmissiveLayer()):
         strut_width: float = 0.002
     ):
         """
-        Creates the toliman aperture layer.
+        Creates the toliman aperture layer. Has normalise = True.
         
         Parameters
         ----------
@@ -345,7 +345,7 @@ class TolimanApertureLayer(TransmissiveLayer()):
         spiders = dlu.spider(coords, strut_width, [0, 120, 240])
         transmission = dlu.combine([outer, inner, spiders], 5)
 
-        super().__init__(transmission=transmission)
+        super().__init__(transmission=transmission, normalise=True)
 
 # Gonna make the 'sidelobe shift layer'
 class SidelobeShiftLayer(AberratedLayer()):

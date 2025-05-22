@@ -326,3 +326,90 @@ class MixedAlphaCen(AlphaCen):
         psfs = propagator(self.wavelengths, positions)
         psfs *= input_weights[..., None, None]
         return psfs.sum((0, 1))
+
+# Thing for sidelobes: just copying PointSources from normal dLux but with one crucial change
+from dLux.sources import Source
+Spectrum = lambda: dLux.spectra.BaseSpectrum
+class LobePointSource(Source):
+    """
+    A simple point source with a spectrum, position and flux.
+
+    ??? abstract "UML"
+        ![UML](../../assets/uml/PointSource.png)
+
+    Attributes
+    ----------
+    position : Array, radians
+        The (x, y) on-sky position of this object.
+    flux : float, photons
+        The flux of the object.
+    spectrum : Spectrum
+        The spectrum of this object, represented by a Spectrum object.
+    """
+
+    position: Array
+    flux: float
+
+    def __init__(
+        self: Source,
+        wavelengths: Array = None,
+        position: Array = np.zeros(2),
+        flux: float = 1.0,
+        weights: Array = None,
+        spectrum: Spectrum() = None,
+    ):
+        """
+        Parameters
+        ----------
+        wavelengths : Array, metres = None
+            The array of wavelengths at which the spectrum is defined. This input is
+            ignored if a Spectrum object is provided.
+        position : Array, radians = np.zeros(2)
+            The (x, y) on-sky position of this object.
+        flux : float, photons = 1.
+            The flux of the object.
+        spectrum : Spectrum = None
+            The spectrum of this object, represented by a Spectrum object.
+        """
+        # Position and Flux
+        self.position = np.asarray(position, dtype=float)
+        self.flux = flux # THE ONE SINGLE CHANGE
+
+        if self.position.shape != (2,):
+            raise ValueError("position must be a 1d array of shape (2,).")
+
+        super().__init__(
+            wavelengths=wavelengths, weights=weights, spectrum=spectrum
+        )
+
+    def model(
+        self: Source,
+        optics: Optics,
+        return_wf: bool = False,
+        return_psf: bool = False,
+    ) -> Array:
+        """
+        Models the source object through the provided optics.
+
+        Parameters
+        ----------
+        optics : Optics
+            The optics through which to model the source object.
+        return_wf : bool = False
+            Should the Wavefront object be returned instead of the psf Array?
+        return_psf : bool = False
+            Should the PSF object be returned instead of the psf Array?
+
+        Returns
+        -------
+        object : Array, Wavefront, PSF
+            if `return_wf` is False and `return_psf` is False, returns the psf Array.
+            if `return_wf` is True and `return_psf` is False, returns the Wavefront
+                object.
+            if `return_wf` is False and `return_psf` is True, returns the PSF object.
+        """
+        self = self.normalise()
+        weights = self.weights * self.flux
+        return optics.propagate(
+            self.wavelengths, self.position, weights, return_wf, return_psf
+        )

@@ -22,6 +22,7 @@ PointSources = dLux.sources.PointSources
 AngularOpticalSystem_object = dLux.optical_systems.AngularOpticalSystem
 Scene = dLux.sources.Scene
 from dLuxToliman.sources import AlphaCen
+from dLuxToliman.sources import LobePointSource
 
 class TolimanOpticalSystem(AngularOpticalSystem()):
     def __init__(
@@ -498,6 +499,12 @@ class SideLobeSystem:
 # Making the sidelobe telescope. want to time it so...
 import time
 
+# Need Bessel functions
+from jax.scipy.special import j0
+from jax.scipy.special import j1
+# from Ben Pope:https://github.com/jax-ml/jax/pull/17038/
+# I just copied and pasted the relevant parts into my jax installation
+
 # make it an instrument
 class SideLobeTelescope(dLux.Instrument):
     
@@ -535,20 +542,35 @@ class SideLobeTelescope(dLux.Instrument):
         return getattr(self.telescope, name)
 
     # define abstract method 'model', necessary for making it an instrument
-
     def model(self):
         return self.telescope.model()
 
+    # define a property: sidelobe (flux) factors
+    @property
+    def sidelobe_factor(self):
+        s_factor = (j0(self.grating_depth/4)**2) * (j1(self.grating_depth/4)**2)
+        return s_factor
+    
+    # central factor
+    @property
+    def central_factor(self):
+        c_factor = j0(self.grating_depth/4)**4
+        return c_factor
 
     # now let's propagate some sidelobes.
     def model_sidelobes(
         self,
         center_wavelength: float,
         corner: Array = np.array([-1,-1]),
-        center: Array = np.array([0,0])
+        center: Array = np.array([0,0]),
+        assumed_pixel_scale: float = None
     ):
-        # TODO: need to make (assumed) pixel scale a parameter
-        optics = self.telescope.optics
+        optics = self.telescope.optics 
+
+        # we have an 'assumed pixel scale' which calculates the position of our central offset
+        # from center_wavelength
+        if assumed_pixel_scale is None:
+            assumed_pixel_scale = optics.psf_pixel_scale
 
         if isinstance(optics, AngularOpticalSystem_object):
 
@@ -556,8 +578,18 @@ class SideLobeTelescope(dLux.Instrument):
             center_angle = np.arcsin(center_wavelength/self.grating_period)
             # getting pixel scale
             pixel_scale = dlu.arcsec2rad(optics.psf_pixel_scale)
+
+            # getting the assumed pixel scale (radians)
+            a_pixel_scale_rad = dlu.arcsec2rad(assumed_pixel_scale)
+
             # make sure that the pixels are discretised correctly
-            center_angle_corrected = np.floor(center_angle/pixel_scale)*pixel_scale
+            # we divide by the assumed pixel scale with a flooring function to get the:
+            # integer number of pixels shifted away.
+            # we then multiply by the true pixel scale to get the true central position
+            # e.g. if we assume the pixel scale is too large
+            # we will have an angle smaller than necessary.
+            # so the true image will be offset further away (our center will be too close)
+            center_angle_corrected = np.floor(center_angle/a_pixel_scale_rad)*pixel_scale
 
             # new center (american spelling)
             new_center = center + corner * center_angle_corrected 
@@ -588,7 +620,8 @@ class SideLobeTelescope(dLux.Instrument):
                 # currently only take scenes as multiple point sources
                 if isinstance(source, PointSource):
                     position = source.position
-                    flux = source.flux
+                    sidelobe_flux = source.flux * self.sidelobe_factor # to get appropriate sidelobe flux.
+                    central_flux = source.flux * self.central_factor # for later
                     # not sure if need .spectrum here
                     wavelengths = source.spectrum.wavelengths
                     weights = source.spectrum.weights
@@ -598,27 +631,27 @@ class SideLobeTelescope(dLux.Instrument):
 
                     # make a bunch of sources, propagate once.
                     for idx, wl in enumerate(wavelengths):
-                        norm_flux = weights[idx]/weights_sum * flux
+                        norm_flux = weights[idx]/weights_sum * sidelobe_flux # appropriate sidelobe flux
 
                         wl_position = position + corner * angles[idx] - new_center
 
-                        mono_source = PointSource(
+                        mono_source = LobePointSource(
                             wavelengths = np.array([wl]),
                             position = wl_position,
-                            flux = np.array(norm_flux), # to keep jax'ible..... not working... don't know why.
+                            flux = norm_flux, # to keep jax'ible..... not working... don't know why.
                             weights = np.array([1]),
-                            milo = True
                         )
 
                         # calling the new sources by the old sources + wavelength index
                         new_name = f"{name}_wl{idx}"
                         new_sources[new_name] = mono_source
 
-                elif isinstance(source, AlphaCen):
-                    weights = self.norm_weights
-                    fluxes = self.raw_fluxes
-                    positions = self.xy_positions
-                    wavelengths = 1e-9 * self.wavelengths
+                elif isinstance(source, AlphaCen): #careful with self/source
+                    weights = source.norm_weights
+                    sidelobe_fluxes = source.raw_fluxes * self.sidelobe_factor
+                    central_fluxes = source.raw_fluxes * self.central_factor
+                    positions = source.xy_positions
+                    wavelengths = 1e-9 * source.wavelengths
                     
                     angles = np.arcsin(wavelengths/self.grating_period)
 
@@ -627,16 +660,15 @@ class SideLobeTelescope(dLux.Instrument):
 
                         # iterate over wavelengths
                         for idx, wl in enumerate(wavelengths):
-                            norm_flux = weights[star, idx] * fluxes[star]
+                            norm_flux = weights[star, idx] * sidelobe_fluxes[star] # for sidelobe
 
                             wl_position = positions[star] + corner * angles[idx] - new_center
 
-                            mono_source = PointSource(
+                            mono_source = LobePointSource(
                                 wavelengths = np.array([wl]),
                                 position = wl_position,
                                 flux = np.array(norm_flux),
                                 weights = np.array([1]),
-                                milo = True
                             )
 
                             # calling the source by old source + star + wavelength index
@@ -659,3 +691,28 @@ class SideLobeTelescope(dLux.Instrument):
             return sidelobe_image         
         else:
             print('error needs to be scene of point sources')
+    
+    def model_4_sidelobes(
+        self,
+        center_wavelength: float,
+        center: Array = np.array([0,0]),
+        assumed_pixel_scale: float = None,
+        downsample: int = None
+    ):
+
+        corners = np.array([[1,1],[-1,1],[-1,-1],[1,-1]])
+        sidelobes = [] # initialising it
+        for corner in corners:
+            result = self.model_sidelobes(
+                center_wavelength = center_wavelength,
+                corner = corner,
+                center = center,
+                assumed_pixel_scale = assumed_pixel_scale
+            )
+            if downsample is not None:
+                result = dlu.downsample(result, downsample, False)
+                
+            sidelobes.append(result)
+
+        return np.array(sidelobes)
+
