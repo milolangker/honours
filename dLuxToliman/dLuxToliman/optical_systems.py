@@ -563,7 +563,8 @@ class SideLobeTelescope(dLux.Instrument):
         center_wavelength: float,
         corner: Array = np.array([-1,-1]),
         center: Array = np.array([0,0]),
-        assumed_pixel_scale: float = None
+        assumed_pixel_scale: float = None,
+        downsample: int = None
     ):
         optics = self.telescope.optics 
 
@@ -686,6 +687,9 @@ class SideLobeTelescope(dLux.Instrument):
             )
             start = time.time()
             sidelobe_image = sidelobe_model_telescope.model()
+            # adding downsample parameter
+            if downsample is not None:
+                sidelobe_image = dlu.downsample(sidelobe_image, downsample, False)
             end = time.time()
             print(f"Model time: {end-start:.4f} seconds.")
             return sidelobe_image         
@@ -707,11 +711,10 @@ class SideLobeTelescope(dLux.Instrument):
                 center_wavelength = center_wavelength,
                 corner = corner,
                 center = center,
-                assumed_pixel_scale = assumed_pixel_scale
+                assumed_pixel_scale = assumed_pixel_scale,
+                downsample = downsample
             )
-            if downsample is not None:
-                result = dlu.downsample(result, downsample, False)
-                
+
             sidelobes.append(result)
 
         return np.array(sidelobes)
