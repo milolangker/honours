@@ -630,7 +630,11 @@ class SideLobeTelescope(dLux.Instrument):
 
                     angles = np.arcsin(wavelengths/self.grating_period) # not paraxial, because its far from center
 
-                    # make a bunch of sources, propagate once.
+                    # this is really jank but going to force it into an array if it isn't currently one
+                    angles = np.atleast_1d(angles)
+                    wavelengths = np.atleast_1d(wavelengths)
+                    
+                    # make a bunch of sources, propagate once. 
                     for idx, wl in enumerate(wavelengths):
                         norm_flux = weights[idx]/weights_sum * sidelobe_flux # appropriate sidelobe flux
 
