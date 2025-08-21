@@ -1,0 +1,7 @@
+# this is the outer gitignore, not the dluxtoliman one
+
+# just ignore the files
+/wk21/spectra/
+/wk21/spectra2/
+/wk22/harps_3000/
+/wk22/harps_sample/
