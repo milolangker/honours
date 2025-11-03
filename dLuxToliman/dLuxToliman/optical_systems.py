@@ -10,7 +10,7 @@ import os
 
 MixedAlphaCen = lambda: dLuxToliman.sources.MixedAlphaCen
 
-__all__ = ["TolimanOpticalSystem", "SideLobeSystem", "SideLobeTelescope"]
+__all__ = ["TolimanOpticalSystem", "SideLobeSystem", "SideLobeTelescope", "SideLobeCLIMB"]
 
 OpticalLayer = lambda: dLux.optical_layers.OpticalLayer
 AngularOpticalSystem = lambda: dLux.optical_systems.AngularOpticalSystem
@@ -400,6 +400,7 @@ class TolimanSpikes(TolimanOpticalSystem):
 # Nevermind, looks like I can just wrap it. Thanks chatgpt
 # although... not sure how this will work with telescope/detector layers and dithers
 # something for future me to worry about.
+# I'm not sure what happened here or if I still use this code.. I think I just use the sidelobetelescope one.
 class SideLobeSystem:
     def __init__(self, optics: AngularOpticalSystem):
         #self._base = base_system #stores original object
@@ -723,3 +724,253 @@ class SideLobeTelescope(dLux.Instrument):
 
         return np.array(sidelobes)
 
+### Making a new system for climb optimisation of the grating
+
+from copy import deepcopy
+
+def strip_layer(optics, layer_name="pupil"):
+    # Get items in a uniform way
+    if isinstance(optics.layers, dict):
+        items = list(optics.layers.items())
+    else:
+        items = list(optics.layers)  # already list of (name, layer)
+
+    # Build the new layers as a list of (name, layer) tuples
+    new_layers = []
+    for name, layer in items:
+        if name == layer_name:
+            continue
+        # must be (str, OpticalLayer) — not strings, not names only
+        new_layers.append((name, deepcopy(layer)))
+
+    # Construct a plain AngularOpticalSystem with the pupil removed
+    return AngularOpticalSystem_object(
+        wf_npixels      = optics.wf_npixels,
+        diameter        = optics.diameter,
+        layers          = new_layers,              # <-- list of (name, OpticalLayer)
+        psf_npixels     = optics.psf_npixels,
+        oversample      = optics.oversample,
+        psf_pixel_scale = optics.psf_pixel_scale,
+    )
+
+class SideLobeCLIMB(dLux.Instrument):
+    
+    telescope: Telescope
+    grating_period: float
+    grating_depth: float
+    middle_wavelength: float
+    assumed_pixel_scale: float
+
+    # initialising
+    def __init__(self, 
+                 telescope: Telescope, 
+                 grating_period: float, 
+                 grating_depth: float,
+                 middle_wavelength: float,
+                 assumed_pixel_scale: float = None):
+        self.telescope = telescope
+        self.grating_period = grating_period
+        self.grating_depth = grating_depth
+        self.middle_wavelength = middle_wavelength
+        self.assumed_pixel_scale = assumed_pixel_scale
+
+    # the reason I want this stuff here is because you can then optimise for these
+    # with jax I think. i.e. can solve for the grating period
+    # also could add a relative angle/offset eventually.
+    # makes sense to have it here because it is part of the actual optics
+    # not just an artefact of propagation
+    
+    # representing itself
+    def __repr__(self):
+        return (
+            "SideLobeTelescope(\n"
+            f"  telescope={repr(self.telescope)},\n"
+            f"  grating_period={self.grating_period},\n"
+            f"  grating_depth={self.grating_depth}\n"
+            ")"
+        )
+    
+    # getting attributes
+    def __getattr__(self, name):
+        return getattr(self.telescope, name)
+
+    # define a property: sidelobe (flux) factors
+    @property
+    def sidelobe_factor(self):
+        s_factor = (j0(self.grating_depth/4)**2) * (j1(self.grating_depth/4)**2)
+        return s_factor
+    
+    # central factor
+    @property
+    def central_factor(self):
+        c_factor = j0(self.grating_depth/4)**4
+        return c_factor
+    
+    # define abstract method 'model', necessary for making it an instrument
+    def model(self):
+        optics = self.telescope.optics
+
+        # we have an 'assumed pixel scale' which calculates the position of our central offset
+        # from center_wavelength
+        assumed_pixel_scale = self.assumed_pixel_scale
+        
+        if assumed_pixel_scale is None:
+            assumed_pixel_scale = optics.psf_pixel_scale
+
+        center = np.array([0,0])
+        corner = np.array([1,1])
+
+        center_wavelength = self.middle_wavelength
+
+        if isinstance(optics, AngularOpticalSystem_object):
+
+            # calculating the central offset
+            center_angle = np.arcsin(center_wavelength/self.grating_period)
+            # getting pixel scale
+            pixel_scale = dlu.arcsec2rad(optics.psf_pixel_scale)
+
+            # getting the assumed pixel scale (radians)
+            a_pixel_scale_rad = dlu.arcsec2rad(assumed_pixel_scale)
+
+            # make sure that the pixels are discretised correctly
+            # we divide by the assumed pixel scale with a flooring function to get the:
+            # integer number of pixels shifted away.
+            # we then multiply by the true pixel scale to get the true central position
+            # e.g. if we assume the pixel scale is too large
+            # we will have an angle smaller than necessary.
+            # so the true image will be offset further away (our center will be too close)
+            center_angle_corrected = np.floor(center_angle/a_pixel_scale_rad)*pixel_scale
+
+            # new center (american spelling)
+            new_center = center + corner * center_angle_corrected 
+
+            oversample = optics.oversample
+            psf_npixels = optics.psf_npixels
+            # blank image
+            image = np.zeros((oversample*psf_npixels, oversample*psf_npixels)) 
+        else:
+            print('error needs to be angular optical system')
+
+        # calling it scene but technically can just be one source
+        scene = self.source
+
+        if not isinstance(scene, Scene):
+            # forcing it to be scene (kinda jank)
+            scene = Scene(scene)
+
+        # propagating sidelobes if you have a scene:
+        if isinstance(scene, Scene):
+            
+            # preparing the new sources
+            new_sources = {}
+
+            # making new central sources
+            new_central_sources = {}
+
+            # using .items gives both name and values
+            for name, source in scene.sources.items():
+
+                # currently only take scenes as multiple point sources
+                if isinstance(source, PointSource):
+                    position = source.position
+                    sidelobe_flux = 4 * source.flux * self.sidelobe_factor # factor of 4 for 4 sidelobes
+                    central_flux = source.flux * self.central_factor # for later
+                    # not sure if need .spectrum here
+                    wavelengths = source.spectrum.wavelengths
+                    weights = source.spectrum.weights
+                    weights_sum = np.sum(weights)
+
+                    angles = np.arcsin(wavelengths/self.grating_period) # not paraxial, because its far from center
+
+                    # this is really jank but going to force it into an array if it isn't currently one
+                    angles = np.atleast_1d(angles)
+                    wavelengths = np.atleast_1d(wavelengths)
+                    
+                    # make a bunch of sources, propagate once. 
+                    for idx, wl in enumerate(wavelengths):
+                        norm_flux = weights[idx]/weights_sum * sidelobe_flux # appropriate sidelobe flux
+
+                        wl_position = position + corner * angles[idx] - new_center
+
+                        mono_source = LobePointSource(
+                            wavelengths = np.array([wl]),
+                            position = wl_position,
+                            flux = norm_flux, # to keep jax'ible..... not working... don't know why.
+                            weights = np.array([1]),
+                        )
+
+                        # calling the new sources by the old sources + wavelength index
+                        new_name = f"{name}_wl{idx}"
+                        new_sources[new_name] = mono_source
+                    
+                    central_source = LobePointSource(
+                        wavelengths = wavelengths,
+                        position = position,
+                        flux = central_flux,
+                        weights = weights
+                    )
+
+                    new_central_name = f"{name}_central"
+                    new_central_sources[new_central_name] = central_source
+
+                # elif isinstance(source, AlphaCen): #careful with self/source
+                #     weights = source.norm_weights
+                #     sidelobe_fluxes = 4 * source.raw_fluxes * self.sidelobe_factor
+                #     central_fluxes = source.raw_fluxes * self.central_factor
+                #     positions = source.xy_positions
+                #     wavelengths = 1e-9 * source.wavelengths
+                    
+                #     angles = np.arcsin(wavelengths/self.grating_period)
+
+                #     # iterate for each star
+                #     for star in range(weights.shape[0]):
+
+                #         # iterate over wavelengths
+                #         for idx, wl in enumerate(wavelengths):
+                #             norm_flux = weights[star, idx] * sidelobe_fluxes[star] # for sidelobe
+
+                #             wl_position = positions[star] + corner * angles[idx] - new_center
+
+                #             mono_source = LobePointSource(
+                #                 wavelengths = np.array([wl]),
+                #                 position = wl_position,
+                #                 flux = np.array(norm_flux),
+                #                 weights = np.array([1]),
+                #             )
+
+                #             # calling the source by old source + star + wavelength index
+                #             new_name = f"{name}_star{star}_wl{idx}"
+                #             new_sources[new_name] = mono_source
+
+                else:
+                    print('error: scene needs to be point sources')
+            
+            # Assuming you can reinitialize the telescope with all original attributes
+            sidelobe_model_telescope = self.telescope.__class__(  # Create a new instance of the same class
+                optics = self.telescope.optics,
+                source = Scene(sources=list(new_sources.items())),
+                detector = self.telescope.detector
+            )
+
+            central_optics = strip_layer(self.telescope.optics, "pupil")
+            central_model_telescope = self.telescope.__class__(
+                optics = central_optics,
+                source = Scene(sources=list(new_central_sources.items())),
+                detector = self.telescope.detector
+            )
+
+            start = time.time()
+            sidelobe_image = sidelobe_model_telescope.model()
+            #central_image = central_model_telescope.model()
+
+            end = time.time()
+            print(f"Model time: {end-start:.4f} seconds.")
+
+            # gonna ignore central optics
+            return sidelobe_image
+            #return np.array([central_image, sidelobe_image])
+                 
+        else:
+            print('error needs to be scene of point sources')
+
+        #return self.telescope.model()

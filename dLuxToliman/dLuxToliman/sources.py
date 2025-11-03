@@ -46,7 +46,7 @@ class AlphaCen(Source()):
         self,
         n_wavels=5,
         separation=10.0,  # arcseconds
-        position_angle=90,  # degrees
+        position_angle=90.0,  # degrees #had to change to 90.0 to make it float
         x_position=0.0,  # arcseconds
         y_position=0.0,  # arcseconds
         log_flux=7.832,  # Photons

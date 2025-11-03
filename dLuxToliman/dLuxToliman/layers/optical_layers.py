@@ -93,6 +93,8 @@ class ApplyBasisCLIMB(BasisLayer()):
         #                                          "scalar array.")
 
     # def __call__(self: OpticalLayer(), wavefront: Wavefront) -> Wavefront:
+
+    # THIS IS COMMENTED OUT: THIS IS THE BINARY PHASE PART
     def apply(self: OpticalLayer(), wavefront: Wavefront) -> Wavefront:
         """
         Generates and applies the binary OPD array to the wavefront in a
@@ -112,6 +114,12 @@ class ApplyBasisCLIMB(BasisLayer()):
         binary_phase = np.pi * self.CLIMB(latent, ppsz=wavefront.npixels)
         opd = self.phase_to_opd(binary_phase, self.ideal_wavelength)
         return wavefront.add_opd(opd)
+    
+    # THIS IS MY NEW PART. Now I will comment out
+    # def apply(self: OpticalLayer(), wavefront: Wavefront) -> Wavefront:
+    #     opd = self.get_total_opd()
+    #     opd_shaped = dlu.downsample(opd, 3, True)
+    #     return wavefront.add_opd(opd_shaped)
 
     @property
     def applied_shape(self):
